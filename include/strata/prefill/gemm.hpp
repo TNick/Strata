@@ -25,7 +25,7 @@ public:
     bool init_external(void* stream, uint16_t* scratch, int64_t scratch_elems, void* workspace, size_t ws_bytes,
                        std::string& err);
 
-    /// Y[T, N] (fp32, row stride ldy) = X[T, K] (bf16, row-major) . W[N, K]^T (bf16, row-major).  `beta` = 1 adds.
+    /// BF16 GEMM on native BF16 devices. On Volta, both operands use FP16 bits and W is staged from BF16.
     void bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K, int64_t ldy = 0,
               float beta = 0.0f);
 
@@ -40,6 +40,8 @@ public:
     /// Caller-owned buffers only: the scratch and workspace moved (the prompt path laid its buffers out again).
     void rebind(uint16_t* scratch, int64_t scratch_elems, void* workspace, size_t ws_bytes);
 
+    bool fp16_operands() const { return !native_bf16_; }
+
     uint16_t* scratch() const { return scratch_; }
     int64_t scratch_elems() const { return scratch_elems_; }
     void* stream() const { return stream_; }
@@ -49,8 +51,11 @@ private:
     void* stream_ = nullptr;
     uint16_t* scratch_ = nullptr;
     int64_t scratch_elems_ = 0;
+    uint16_t* w16_ = nullptr;
+    int64_t w16_elems_ = 0;
     void* workspace_ = nullptr;
     bool external_ = false;
+    bool native_bf16_ = true;
     void* hipblaslt_state_ = nullptr;
 };
 

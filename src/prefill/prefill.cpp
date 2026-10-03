@@ -167,8 +167,25 @@ inline int bf16x2_mode() {
     }();
     return v;
 }
-inline bool bf16x2() { return bf16x2_mode() != 0; }
-inline bool bf16x2_hc() { return bf16x2_mode() == 1; }
+inline bool native_bf16() {
+    static thread_local int cached_dev = -1;
+    static thread_local bool cached_native = false;
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) { cudaGetLastError(); return false; }
+    if (dev != cached_dev) {
+        int major = 0;
+        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) {
+            cudaGetLastError();
+            cached_dev = -1;
+            return false;
+        }
+        cached_dev = dev;
+        cached_native = major >= 8;
+    }
+    return cached_native;
+}
+inline bool bf16x2() { return bf16x2_mode() != 0 && native_bf16(); }
+inline bool bf16x2_hc() { return bf16x2_mode() == 1 && native_bf16(); }
 
 // F-1: STRATA_GR_UNFUSED=1 keeps the FP32 copy of the normalized rows (gr_norm + gr_mix), the A/B arm
 inline bool gr_unfused() {
@@ -1671,13 +1688,13 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     uint16_t* e16_lo = bf16x2() ? (uint16_t*) carve_f((size_t) nb * N / 2) : nullptr;
                     const float* emb = m.ple_emb + s0 * N;
                     if (pw.key_bf16 != nullptr) {
-                        to_bf16(emb, e16, nb * N, m.cs, e16_lo);
+                    m.gemm.fp16_operands() ? to_f16(emb, e16, nb * N, m.cs) : (void) to_bf16(emb, e16, nb * N, m.cs, e16_lo);
                         m.gemm.bf16(e16, pw.key_bf16, key, nb, HD, N);
                         if (e16_lo) m.gemm.bf16(e16_lo, pw.key_bf16, key, nb, HD, N, 0, 1.0f);
                     } else {
                         to_f16(emb, e16, nb * N, m.cs);
                         m.gemm.native(e16, pw.key_native_type, pw.key_native_data, key, nb, HD, N);
-                        to_bf16(emb, e16, nb * N, m.cs, e16_lo);
+                    m.gemm.fp16_operands() ? to_f16(emb, e16, nb * N, m.cs) : (void) to_bf16(emb, e16, nb * N, m.cs, e16_lo);
                     }
                     m.gemm.bf16(e16, pw.value_bf16, val, nb, N, N);
                     if (e16_lo) m.gemm.bf16(e16_lo, pw.value_bf16, val, nb, N, N, 0, 1.0f);

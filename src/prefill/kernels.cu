@@ -17,6 +17,9 @@ namespace {
 constexpr int N = 2560, HC = 4, D = N * HC, LR = 320;
 constexpr int S = 128, HK = 16, HV = 48, C = 10240;
 
+__device__ bool g_fp16_bits_device = false;
+bool g_fp16_bits_host = false;
+
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
@@ -74,9 +77,9 @@ __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr
     for (int d = threadIdx.x; d < N; d += blockDim.x) {
         const float v = r[d] * rs * w[c * N + d];
         xn[row * N + d] = v;
-        const uint16_t h = bf(v);
+        const uint16_t h = g_fp16_bits_device ? hf(v) : bf(v);
         xn16[row * N + d] = h;
-        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);
+        if (!g_fp16_bits_device && xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);
     }
 }
 // F-1: the row scale only (and the BF16 image); gr_mix_r_kernel recomputes r * rs * w itself, in the same order,
@@ -94,9 +97,9 @@ __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __re
     if (threadIdx.x == 0) rs_out[row] = rs;
     for (int d = threadIdx.x; d < N; d += blockDim.x) {
         const float v = r[d] * rs * w[c * N + d];
-        const uint16_t h = bf(v);
+        const uint16_t h = g_fp16_bits_device ? hf(v) : bf(v);
         xn16[row * N + d] = h;
-        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);
+        if (!g_fp16_bits_device && xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);
     }
 }
 __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __restrict__ rs, const float* __restrict__ w,
@@ -115,9 +118,9 @@ __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __rest
     s /= (float) HC;
     mixed[i] = s;
     if (mixed16) {
-        const uint16_t h = bf(s);
+        const uint16_t h = g_fp16_bits_device ? hf(s) : bf(s);
         mixed16[i] = h;
-        if (mixed16_lo) mixed16_lo[i] = bf_lo(s, h);
+        if (!g_fp16_bits_device && mixed16_lo) mixed16_lo[i] = bf_lo(s, h);
     }
     if (mixed_h) mixed_h[i] = hf(s);
 }
@@ -152,9 +155,9 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
 #pragma unroll
     for (int d = threadIdx.x; d < N; d += 256, ++k) {
         const float x = v[k] * rs * w[c * N + d];
-        const uint16_t h = bf(x);
+        const uint16_t h = g_fp16_bits_device ? hf(x) : bf(x);
         xn16[row * N + d] = h;
-        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(x, h);
+        if (!g_fp16_bits_device && xn16_lo) xn16_lo[row * N + d] = bf_lo(x, h);
     }
 }
 __global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restrict__ lo16, uint16_t* __restrict__ lo16_lo,
@@ -163,9 +166,9 @@ __global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restric
     if (i >= n) return;
     const float x = lo[i] / (float) HC;
     const float v = x / (1.0f + __expf(-x));
-    const uint16_t h = bf(v);
+    const uint16_t h = g_fp16_bits_device ? hf(v) : bf(v);
     lo16[i] = h;
-    if (lo16_lo) lo16_lo[i] = bf_lo(v, h);
+    if (!g_fp16_bits_device && lo16_lo) lo16_lo[i] = bf_lo(v, h);
 }
 __global__ void gr_mix_kernel(const float* __restrict__ xn, const float* __restrict__ g, float* __restrict__ mixed,
                               uint16_t* __restrict__ mixed16, int64_t T, uint16_t* __restrict__ mixed_h,
@@ -182,9 +185,9 @@ __global__ void gr_mix_kernel(const float* __restrict__ xn, const float* __restr
     s /= (float) HC;
     mixed[i] = s;
     if (mixed16) {
-        const uint16_t h = bf(s);
+        const uint16_t h = g_fp16_bits_device ? hf(s) : bf(s);
         mixed16[i] = h;
-        if (mixed16_lo) mixed16_lo[i] = bf_lo(s, h);
+        if (!g_fp16_bits_device && mixed16_lo) mixed16_lo[i] = bf_lo(s, h);
     }
     if (mixed_h) mixed_h[i] = hf(s);
 }
@@ -823,6 +826,13 @@ __global__ void to_bf16_kernel(const float* __restrict__ x, uint16_t* __restrict
 }
 
 }  // namespace
+
+void set_fp16_bits(bool on) {
+    g_fp16_bits_host = on;
+    cudaMemcpyToSymbol(g_fp16_bits_device, &on, sizeof on);
+}
+
+bool fp16_bits() { return g_fp16_bits_host; }
 
 void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const int32_t* page_table, int64_t page_size,
                uint16_t* k_pool, uint16_t* v_pool, int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale,

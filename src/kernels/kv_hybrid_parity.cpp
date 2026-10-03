@@ -333,8 +333,17 @@ int main() {
             // AMD: the tensor-core prompt path is CUDA-only, so it refuses every pool and the old kernel runs
             std::printf("[5/5] qsa_prompt_attn mode 3: PASS (refused on HIP - the old kernel runs)\n");
 #else
-            std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
-            g_fail = 1;
+            cudaDeviceProp prop{};
+            ck(cudaGetDeviceProperties(&prop, 0), "device properties");
+            if (prop.major == 7 && prop.minor == 0) {
+                // The WMMA prompt path deliberately refuses Volta: its tensor-core
+                // implementation is guarded at runtime and the portable decode path
+                // above is the correctness path for this architecture.
+                std::printf("[5/5] qsa_prompt_attn mode 3: SKIPPED (unsupported on sm_70)\n");
+            } else {
+                std::printf("[5/5] qsa_prompt_attn mode 3: FAIL (refused the hybrid pools)\n");
+                g_fail = 1;
+            }
 #endif
         } else {
             k::fwht256_inplace_cuda(d_at4, QH, nullptr);

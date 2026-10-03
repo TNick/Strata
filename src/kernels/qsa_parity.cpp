@@ -556,8 +556,10 @@ int main(int argc, char** argv) {
     }
     std::vector<float> w_kn((size_t) IDXD);
     for (auto& x : w_kn) x = 1.0f + 0.1f * rnd(1.0);
-    std::vector<float> cos_tab((size_t) (2000 * S.n_rot / 2)), sin_tab(cos_tab.size());
-    strata::kernels::build_rope_table((int) S.n_rot, THETA, 2000, cos_tab.data(), sin_tab.data());
+    // Section 6 appends T=2100 positions; keep one complete table row per possible position.
+    constexpr int ROPE_ROWS = 2200;
+    std::vector<float> cos_tab((size_t) (ROPE_ROWS * S.n_rot / 2)), sin_tab(cos_tab.size());
+    strata::kernels::build_rope_table((int) S.n_rot, THETA, ROPE_ROWS, cos_tab.data(), sin_tab.data());
     Dev<float> dw_kn, dcos, dsin;
     dw_kn.put(w_kn);
     dcos.put(cos_tab);

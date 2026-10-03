@@ -1,5 +1,6 @@
 // src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
 #include "strata/prefill/gemm.hpp"
+#include "strata/prefill/kernels.hpp"
 #include "strata/kernels/dequant_bf16.hpp"
 
 #include <cublas_v2.h>
@@ -62,6 +63,30 @@ void absorb_hipblas_sticky(const char* what) {
 // A setup call whose failure the engine survives (the handle keeps its defaults), as before #240 - but said.
 void note(cublasStatus_t s, const char* what) {
     if (s != CUBLAS_STATUS_SUCCESS) std::fprintf(stderr, "prefill gemm: %s: cuBLAS status %d (continuing)\n", what, (int) s);
+}
+
+__global__ void bf16_to_f16_kernel(const uint16_t* in, uint16_t* out, int64_t n) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const uint32_t bits = (uint32_t) in[i] << 16;
+    out[i] = __half_as_ushort(__float2half_rn(__uint_as_float(bits)));
+}
+
+void launch_bf16_to_f16(const uint16_t* in, uint16_t* out, int64_t n, cudaStream_t stream) {
+    if (n <= 0) return;
+    bf16_to_f16_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, stream>>>(in, out, n);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "prefill gemm: bf16->fp16: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+}
+
+bool device_has_native_bf16() {
+    int ordinal = 0;
+    cudaDeviceProp properties{};
+    return cudaGetDevice(&ordinal) == cudaSuccess &&
+           cudaGetDeviceProperties(&properties, ordinal) == cudaSuccess && properties.major >= 8;
 }
 
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
@@ -298,6 +323,7 @@ Gemm::~Gemm() {
     delete static_cast<HipLtState*>(hipblaslt_state_);
 #endif
     if (handle_) cublasDestroy((cublasHandle_t) handle_);
+    if (w16_) cudaFree(w16_);
     if (!external_) {
         if (scratch_) cudaFree(scratch_);
         if (workspace_) cudaFree(workspace_);
@@ -318,6 +344,8 @@ bool Gemm::init_external(void* stream, uint16_t* scratch, int64_t scratch_elems,
     workspace_ = workspace;
     note(cublasSetWorkspace(h, workspace_, ws_bytes), "cublasSetWorkspace");
     note(cublasSetMathMode(h, CUBLAS_DEFAULT_MATH), "cublasSetMathMode");
+    native_bf16_ = device_has_native_bf16();
+    strata::prefill::set_fp16_bits(!native_bf16_);
     scratch_ = scratch;
     scratch_elems_ = scratch_elems;
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
@@ -358,6 +386,8 @@ bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
     }
     note(cublasSetWorkspace(h, workspace_, ws), "cublasSetWorkspace");
     note(cublasSetMathMode(h, CUBLAS_DEFAULT_MATH), "cublasSetMathMode");
+    native_bf16_ = device_has_native_bf16();
+    strata::prefill::set_fp16_bits(!native_bf16_);
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     hipblaslt_state_ = create_hipblaslt_state(workspace_, ws).release();
 #endif
@@ -377,6 +407,29 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
     if (T <= 0 || N <= 0) return;
     if (ldy <= 0) ldy = N;
     const float alpha = 1.0f;
+    if (!native_bf16_) {
+        const int64_t w_elems = N * K;
+        uint16_t* w16 = scratch_;
+        if (w16 == nullptr || w_elems > scratch_elems_) {
+            if (w_elems > w16_elems_) {
+                if (w16_) cudaFree(w16_);
+                w16_ = nullptr;
+                w16_elems_ = 0;
+                if (cudaMalloc(&w16_, (size_t) w_elems * 2) != cudaSuccess) {
+                    std::fprintf(stderr, "prefill gemm: Volta W staging of %lld elems\n", (long long) w_elems);
+                    std::exit(1);
+                }
+                w16_elems_ = w_elems;
+            }
+            w16 = w16_;
+        }
+        launch_bf16_to_f16(W, w16, w_elems, (cudaStream_t) stream_);
+        ck(cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) T, (int) K, &alpha, w16,
+                        CUDA_R_16F, (int) K, X, CUDA_R_16F, (int) K, &beta, Y, CUDA_R_32F, (int) ldy,
+                        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+           "cublasGemmEx fp16 (Volta bf16 path)");
+        return;
+    }
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
     if (try_hipblaslt(hipblaslt_state_, strata::prefill::hipblaslt::InputType::bf16, X, W, Y, T, N, K, ldy,
                       beta, stream_)) {
