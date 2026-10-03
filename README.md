@@ -174,7 +174,10 @@ details](docs/DETAILS.md#how-it-works) and the [paper](docs/paper/Strata-Paper.p
 
 The model is [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team, compressed by
 [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5) and Unsloth;
-Strata is built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
+Strata is built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). The Volta `sm_70`
+integration in the [TNICK V100 fork](https://github.com/TNick/Strata) incorporates and adapts the V100 work from
+the [jmnargi/Strata-V100 fork](https://github.com/jmnargi/Strata-V100), specifically revision
+`53ec8b00957663f2aeea8a709fd925c18efa9b3f`, on top of upstream Strata. All credits:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). Strata is open source under the [MIT License](LICENSE); a few
 parts and every model carry their own licenses ([which ones](docs/HOW_IT_WORKS.md#license)).
 
